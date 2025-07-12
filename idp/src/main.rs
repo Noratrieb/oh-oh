@@ -8,7 +8,7 @@ use askama::Template;
 use axum::{
     Form, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -60,6 +60,8 @@ async fn main() -> Result<()> {
         .route("/signup", get(signup).post(signup_post))
         .route("/login", get(login).post(login_post))
         .route("/2fa", get(list_2fa))
+        .route("/sessions", get(list_sessions))
+        .route("/sessions/delete", post(delete_session))
         .route("/2fa/delete", post(delete_2fa))
         .route("/add-totp", get(add_totp).post(add_totp_post))
         .route("/users", get(users))
@@ -151,6 +153,54 @@ async fn list_2fa(user: UserSession, State(db): State<Db>) -> Result<impl IntoRe
     }
 
     Ok(Html(Template { devices }.render().unwrap()))
+}
+
+async fn list_sessions(
+    user: UserSession,
+    State(db): State<Db>,
+) -> Result<impl IntoResponse, Response> {
+    let Some(user) = user.0 else {
+        return Err(Redirect::to("/").into_response());
+    };
+
+    let sessions = session::find_sessions_for_user(&db, user.user_id)
+        .await
+        .map_err(|err| {
+            error!(?err, "Error fetching sessions");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    #[derive(askama::Template)]
+    #[template(path = "sessions.html")]
+    struct Template {
+        sessions: Vec<session::SessionForList>,
+    }
+
+    Ok(Html(Template { sessions }.render().unwrap()))
+}
+
+#[derive(Deserialize)]
+struct DeleteSessionForm {
+    session_public_id: i64,
+}
+
+async fn delete_session(
+    user: UserSession,
+    State(db): State<Db>,
+    Form(form): Form<DeleteSessionForm>,
+) -> Result<impl IntoResponse, Response> {
+    let Some(user) = user.0 else {
+        return Err(Redirect::to("/").into_response());
+    };
+
+    session::delete_session(&db, user.user_id, form.session_public_id)
+        .await
+        .map_err(|err| {
+            error!(?err, "Failed to delete session");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    Ok(Redirect::to("/sessions"))
 }
 
 #[derive(Deserialize)]
@@ -253,11 +303,17 @@ struct UsernamePasswordForm {
     password: String,
 }
 
-async fn make_session_cookie_for_user(db: &Db, user_id: i64) -> Result<Cookie<'static>, Response> {
-    let session = session::create_session(&db, user_id).await.map_err(|err| {
-        error!(?err, "Failed to create session for user");
-        StatusCode::INTERNAL_SERVER_ERROR.into_response()
-    })?;
+async fn make_session_cookie_for_user(
+    db: &Db,
+    user_id: i64,
+    user_agent: &str,
+) -> Result<Cookie<'static>, Response> {
+    let session = session::create_session(&db, user_id, user_agent)
+        .await
+        .map_err(|err| {
+            error!(?err, "Failed to create session for user");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
 
     Ok(Cookie::build((SESSION_ID_COOKIE_NAME, session.0))
         .secure(true)
@@ -272,6 +328,7 @@ async fn make_session_cookie_for_user(db: &Db, user_id: i64) -> Result<Cookie<'s
 }
 
 async fn signup_post(
+    headers: HeaderMap,
     State(db): State<Db>,
     jar: CookieJar,
     Form(signup): Form<UsernamePasswordForm>,
@@ -294,12 +351,18 @@ async fn signup_post(
         .into_response());
     };
 
-    let session_id = make_session_cookie_for_user(&db, user.id).await?;
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| str::from_utf8(v.as_bytes()).ok())
+        .unwrap_or("unknown");
+
+    let session_id = make_session_cookie_for_user(&db, user.id, user_agent).await?;
 
     Ok((jar.add(session_id), Redirect::to("/")))
 }
 
 async fn login_post(
+    headers: HeaderMap,
     State(db): State<Db>,
     jar: CookieJar,
     Form(login): Form<UsernamePasswordForm>,
@@ -315,7 +378,12 @@ async fn login_post(
         return Err(Html(LoginTemplate { error: true }.render().unwrap()).into_response());
     };
 
-    let session_id = make_session_cookie_for_user(&db, user.id).await?;
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| str::from_utf8(v.as_bytes()).ok())
+        .unwrap_or("unknown");
+
+    let session_id = make_session_cookie_for_user(&db, user.id, user_agent).await?;
 
     Ok((jar.add(session_id), Redirect::to("/")))
 }

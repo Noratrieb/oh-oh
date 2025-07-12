@@ -34,18 +34,48 @@ pub async fn find_session(db: &Db, session_id: &str) -> Result<Option<SessionWit
     }
 }
 
-pub async fn create_session(db: &Db, user_id: i64) -> Result<SessionId> {
+#[derive(Debug, sqlx::FromRow)]
+pub struct SessionForList {
+    pub created: i64,
+    pub session_public_id: i64,
+    pub user_agent: String,
+}
+
+pub async fn find_sessions_for_user(db: &Db, user_id: i64) -> Result<Vec<SessionForList>> {
+    sqlx::query_as::<_, SessionForList>(
+        "select created, session_public_id, user_agent from sessions where user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_all(&db.pool)
+    .await
+    .wrap_err("failed to fetch sessions for user")
+}
+
+pub async fn delete_session(db: &Db, user_id: i64, session_public_id: i64) -> Result<()> {
+    sqlx::query("delete from sessions where user_id = ? and session_public_id = ?")
+        .bind(user_id)
+        .bind(session_public_id)
+        .execute(&db.pool)
+        .await
+        .wrap_err("failed to delete session")?;
+    Ok(())
+}
+
+pub async fn create_session(db: &Db, user_id: i64, user_agent: &str) -> Result<SessionId> {
     let mut session_id = [0_u8; 32];
     rand_core::OsRng.fill_bytes(&mut session_id);
     let session_id = format!("idpsess_{}", hex::encode(session_id));
 
-    sqlx::query("insert into sessions (session_id, user_id, created) values (?, ?, ?)")
-        .bind(&session_id)
-        .bind(user_id)
-        .bind(jiff::Timestamp::now().as_millisecond())
-        .execute(&db.pool)
-        .await
-        .wrap_err("inserting new session")?;
+    sqlx::query(
+        "insert into sessions (session_id, user_id, created, user_agent) values (?, ?, ?, ?)",
+    )
+    .bind(&session_id)
+    .bind(user_id)
+    .bind(jiff::Timestamp::now().as_millisecond())
+    .bind(user_agent)
+    .execute(&db.pool)
+    .await
+    .wrap_err("inserting new session")?;
 
     Ok(SessionId(session_id))
 }
@@ -63,7 +93,7 @@ impl FromRequestParts<Db> for UserSession {
         let jar = CookieJar::from_headers(&parts.headers);
 
         match jar.get(crate::SESSION_ID_COOKIE_NAME) {
-            None => Err(StatusCode::FORBIDDEN.into_response()),
+            None => Ok(UserSession(None)),
             Some(cookie) => {
                 let sess = find_session(&db, cookie.value()).await;
                 match sess {

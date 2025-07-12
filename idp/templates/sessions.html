@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sessions - IDP</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <h1>See all sessions your account</h1>
+    <a href="/">home</a>
+
+    <ul>
+      {% for session in sessions %}
+      <li>
+        {{session.user_agent}} (added
+        {{jiff::Timestamp::from_millisecond(*session.created).unwrap()
+        .strftime("%A, %d %B %Y at %I:%M %Q")}})
+        <form method="post" action="/sessions/delete" class="fake-form">
+          <input type="hidden" name="session_public_id" value="{{session.session_public_id}}" />
+          <button type="submit">delete</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+  </body>
+</html>
