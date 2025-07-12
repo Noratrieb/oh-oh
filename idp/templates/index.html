@@ -21,5 +21,13 @@
     <div>
       <a href="/users">List all users</a>
     </div>
+    {% if let Some(username) = username %}
+    <div>
+      <a href="/add-totp">Add a new 2FA device to your account</a>
+    </div>
+    <div>
+      <a href="/2fa">List all 2FA devices for your account</a>
+    </div>
+    {% endif %}
   </body>
 </html>

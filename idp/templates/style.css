@@ -3,6 +3,36 @@ body {
   width: 100%;
 }
 
+@media (prefers-color-scheme: dark) {
+  body {
+    background-color: rgb(41, 41, 41);
+    color: white;
+  }
+
+  a {
+    color: lightblue;
+  }
+
+  input {
+    background-color: rgb(41, 41, 41);
+    border: 1px solid gray;
+    height: 1.8rem;
+    color: white;
+  }
+}
+
+button {
+  background-color: coral;
+  border-width: 0;
+
+  &:hover {
+    background-color: color-mix(in oklab, coral 80%, black 20%);
+    cursor: pointer;
+  }
+
+  height: 2rem;
+}
+
 body {
   display: flex;
   flex-direction: column;
@@ -11,11 +41,15 @@ body {
 
 /* Home Link */
 a[href="/"] {
-    margin-bottom: 20px;
+  margin-bottom: 20px;
 }
 
-form {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+form + :not(.fake-form) {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fake-form {
+    display: inline-block;
 }

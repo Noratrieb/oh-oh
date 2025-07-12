@@ -1,4 +1,5 @@
 mod session;
+mod totp;
 mod users;
 
 use std::str::FromStr;
@@ -9,7 +10,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
-    routing::get,
+    routing::{get, post},
 };
 use axum_extra::extract::{
     CookieJar,
@@ -58,6 +59,9 @@ async fn main() -> Result<()> {
         .route("/", get(root))
         .route("/signup", get(signup).post(signup_post))
         .route("/login", get(login).post(login_post))
+        .route("/2fa", get(list_2fa))
+        .route("/2fa/delete", post(delete_2fa))
+        .route("/add-totp", get(add_totp).post(add_totp_post))
         .route("/users", get(users))
         .with_state(Db { pool });
 
@@ -116,9 +120,115 @@ struct LoginTemplate {
     error: bool,
 }
 
+#[derive(askama::Template)]
+#[template(path = "add-totp.html")]
+struct AddTotpTemplate {
+    totp_secret: String,
+    error: bool,
+}
+
 #[axum::debug_handler]
 async fn login() -> impl IntoResponse {
     Html(LoginTemplate { error: false }.render().unwrap())
+}
+
+async fn list_2fa(user: UserSession, State(db): State<Db>) -> Result<impl IntoResponse, Response> {
+    let Some(user) = user.0 else {
+        return Err(Redirect::to("/").into_response());
+    };
+
+    let devices = totp::list_totp_devices(&db, user.user_id)
+        .await
+        .map_err(|err| {
+            error!(?err, "Error fetching totp devices");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    #[derive(askama::Template)]
+    #[template(path = "2fa.html")]
+    struct Template {
+        devices: Vec<totp::TotpDevice>,
+    }
+
+    Ok(Html(Template { devices }.render().unwrap()))
+}
+
+#[derive(Deserialize)]
+struct Delete2faForm {
+    device_id: i64,
+}
+
+async fn delete_2fa(
+    user: UserSession,
+    State(db): State<Db>,
+    Form(form): Form<Delete2faForm>,
+) -> Result<impl IntoResponse, Response> {
+    let Some(user) = user.0 else {
+        return Err(Redirect::to("/").into_response());
+    };
+
+    totp::delete_totp_device(&db, user.user_id, form.device_id)
+        .await
+        .map_err(|err| {
+            error!(?err, "Failed to delete totp device");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    Ok(Redirect::to("/2fa"))
+}
+
+#[axum::debug_handler]
+async fn add_totp() -> impl IntoResponse {
+    let secret = totp::generate_secret();
+
+    Html(
+        AddTotpTemplate {
+            totp_secret: secret,
+            error: false,
+        }
+        .render()
+        .unwrap(),
+    )
+}
+
+#[derive(Deserialize)]
+struct AddTotpForm {
+    name: String,
+    code: String,
+    secret: String,
+}
+
+async fn add_totp_post(
+    user: UserSession,
+    State(db): State<Db>,
+    Form(form): Form<AddTotpForm>,
+) -> Result<impl IntoResponse, Response> {
+    let Some(user) = user.0 else {
+        return Err(Redirect::to("/").into_response());
+    };
+
+    let computed = totp::Totp::compute(&form.secret, jiff::Timestamp::now().as_second() as u64);
+
+    if computed.digits != form.code.trim() {
+        return Err(Html(
+            AddTotpTemplate {
+                totp_secret: form.secret,
+                error: true,
+            }
+            .render()
+            .unwrap(),
+        )
+        .into_response());
+    }
+
+    totp::insert_totp_device(&db, user.user_id, form.secret, form.name)
+        .await
+        .map_err(|err| {
+            error!(?err, "Error inserting totp device");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    Ok(Redirect::to("/2fa"))
 }
 
 #[axum::debug_handler]

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>2FA - IDP</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <h1>See 2FA devices for your account</h1>
+    <a href="/">home</a>
+
+    <ul>
+      {% for device in devices %}
+      <li>
+        {{device.name}} (added
+        {{jiff::Timestamp::from_millisecond(*device.created_time).unwrap()
+        .strftime("%A, %d %B %Y at %I:%M %Q")}})
+        <form method="post" action="/2fa/delete" class="fake-form">
+            <input type="hidden" name="device_id" value="{{device.id}}" />
+            <button type="submit">delete</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+  </body>
+</html>

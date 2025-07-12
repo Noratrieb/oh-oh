@@ -11,8 +11,7 @@ use crate::Db;
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct SessionWithUser {
-    #[expect(dead_code)]
-    pub user_id: i32,
+    pub user_id: i64,
     /// unix ms
     #[expect(dead_code)]
     pub created: i64,

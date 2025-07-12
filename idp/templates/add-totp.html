@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Add 2FA - IDP</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <h1>Add 2FA to your account</h1>
+    <a href="/">home</a>
+    <form method="post" action="/add-totp">
+      <p>
+        Copy this secret into your authenticator app and enter the code from it
+        below.
+      </p>
+      <p>
+        You can also add a name for your devide to help you identify it in the
+        future.
+      </p>
+      <dl>
+        <dt>2FA TOTP Secret</dt>
+        <dd>{{totp_secret}}</dd>
+      </dl>
+
+      <div>
+        <label for="name">Device name</label>
+        <input id="name" name="name" />
+      </div>
+
+      <div>
+        <label for="code">2FA Code</label>
+        <input id="code" name="code" />
+      </div>
+
+      <div style="display: none" aria-hidden="true">
+        <input id="secret" name="secret" value="{{totp_secret}}" />
+      </div>
+
+      <button type="submit">Confirm</button>
+
+      {% if error %}
+      <p>Invalid 2FA code</p>
+      {% endif %}
+    </form>
+  </body>
+</html>
