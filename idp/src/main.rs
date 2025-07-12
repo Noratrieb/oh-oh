@@ -54,7 +54,8 @@ async fn main() -> Result<()> {
         .wrap_err("running migrations")?;
 
     let app = Router::<Db>::new()
-        .route("/", get::<_, _, Db>(root))
+        .route("/style.css", get(style_css))
+        .route("/", get(root))
         .route("/signup", get(signup).post(signup_post))
         .route("/login", get(login).post(login_post))
         .route("/users", get(users))
@@ -66,6 +67,14 @@ async fn main() -> Result<()> {
         .wrap_err("binding listener")?;
     info!(?addr, "Starting server");
     axum::serve(listener, app).await.wrap_err("serving app")
+}
+
+async fn style_css() -> impl IntoResponse {
+    let header = [(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/css; charset=utf-8"),
+    )];
+    (header, include_str!("../templates/style.css"))
 }
 
 async fn root(session: UserSession) -> impl IntoResponse {
