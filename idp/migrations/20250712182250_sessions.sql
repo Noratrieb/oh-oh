@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT NOT NULL PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created INTEGER NOT NULL,
+
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) STRICT;

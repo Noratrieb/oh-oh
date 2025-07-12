@@ -1,0 +1,21 @@
+[package]
+name = "idp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+argon2 = "0.5.3"
+askama = "0.14.0"
+axum = { version = "0.8.4", features = ["macros"] }
+axum-extra = { version = "0.10.1", features = ["cookie"] }
+color-eyre = "0.6.5"
+hex = "0.4.3"
+jiff = "0.2.15"
+password-hash = { version = "0.5.0" }
+rand_core = { version = "0.6.0", features = ["getrandom"] }
+serde = { version = "1.0.219", features = ["derive"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "migrate", "macros", "sqlite"] }
+time = "0.3.41"
+tokio = { version = "1.46.1", features = ["full"] }
+tracing = { version = "0.1.41", features = ["attributes"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

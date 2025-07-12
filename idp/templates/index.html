@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IDP</title>
+  </head>
+  <body>
+    <h1>Your favorite identity provider</h1>
+    <a href="/">home</a>
+    {% if let Some(username) = username %}
+    <p>Hello, {{username}}!</p>
+    {% endif %}
+    <div>
+      <a href="/signup">Create an account</a>
+    </div>
+    <div>
+      <a href="/login">Login</a>
+    </div>
+    <div>
+      <a href="/users">List all users</a>
+    </div>
+  </body>
+</html>

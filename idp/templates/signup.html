@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Signup - IDP</title>
+  </head>
+  <body>
+    <h1>Create a new account</h1>
+    <a href="/">home</a>
+    <form method="post" action="/signup">
+      <div>
+        <label for="username">Username</label>
+        <input id="username" name="username" />
+      </div>
+
+      <div>
+        <label for="password">Password</label>
+        <input id="password" name="password" />
+      </div>
+
+      <button type="submit">Create Account</button>
+
+      {% if already_exists %}
+      <p>Username is already taken</p>
+      {% endif %}
+    </form>
+  </body>
+</html>
