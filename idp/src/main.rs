@@ -435,6 +435,8 @@ async fn login_2fa_post(
 ) -> Result<impl IntoResponse, Response> {
     let now = jiff::Timestamp::now();
 
+    // TODO: limit age of locked session
+
     let Some(session_id) = jar.get(crate::SESSION_ID_COOKIE_NAME) else {
         return Err(Redirect::to("/").into_response());
     };
