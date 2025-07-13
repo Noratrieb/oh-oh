@@ -732,7 +732,8 @@ async fn connect_token(
     let id_token_headers = base64::prelude::BASE64_URL_SAFE.encode(
         serde_json::to_string(&json!({
             "typ": "JWT",
-            "alg": "RS256"
+            "alg": "RS256",
+            "kid": "1"
         }))
         .unwrap(),
     );
