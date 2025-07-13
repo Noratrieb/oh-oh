@@ -871,6 +871,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "base32",
+ "base64",
  "color-eyre",
  "hex",
  "hmac",
@@ -878,12 +879,14 @@ dependencies = [
  "password-hash",
  "rand_core",
  "serde",
+ "serde_json",
  "sha1",
  "sqlx",
  "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

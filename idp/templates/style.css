@@ -3,6 +3,10 @@ body {
   width: 100%;
 }
 
+html {
+  font-family: sans-serif;
+}
+
 @media (prefers-color-scheme: dark) {
   body {
     background-color: rgb(41, 41, 41);
@@ -52,4 +56,18 @@ form:not(.fake-form) {
 
 .fake-form {
   display: inline-block;
+}
+
+table {
+  th {
+    text-align: left;
+  }
+
+  th, td {
+    padding-bottom: 10px;
+  }
+  
+  :is(td, th):not(:last-child) {
+    padding-right: 10px;
+  }
 }

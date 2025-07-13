@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OAuth Clients - IDP</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <h1>See OAuth clients registered</h1>
+    <a href="/">home</a>
+
+    <table>
+        <thead>
+            <tr>
+                <th>App Name</th>
+                <th>Client ID</th>
+                <th>Redirect URI</th>
+                <th>Client Type</th>
+                <th>Client Secret</th>
+            </th>
+        </thead>
+        <tbody>
+        {% for client in clients %}
+        <tr>
+            <td>{{ client.app_name }}</td>
+            <td>{{ client.client_id }}</td>
+            <td>{{ client.redirect_uri }}</td>
+            <td>{{ client.client_type }}</td>
+            <td>{{ client.client_secret }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </body>
+</html>

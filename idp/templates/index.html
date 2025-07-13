@@ -9,9 +9,17 @@
   <body>
     <h1>Your favorite identity provider</h1>
     <a href="/">home</a>
+    <p>OAuth Config</p>
+    <div>
+      <a href="/oauth-clients">List all OAuth clients</a>
+    </div>
+    <div>
+      <a href="/add-oauth-client">Register a new OAuth client</a>
+    </div>
     {% if let Some(username) = username %}
     <p>Hello, {{username}}!</p>
     {% endif %}
+    <p>Login</p>
     <div>
       <a href="/signup">Create an account</a>
     </div>
@@ -22,6 +30,7 @@
       <a href="/users">List all users</a>
     </div>
     {% if let Some(username) = username %}
+    <p>Account</p>
     <div>
       <a href="/sessions">List all active sessions your account</a>
     </div>

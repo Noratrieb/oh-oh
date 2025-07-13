@@ -1,14 +1,15 @@
+mod oidc;
 mod session;
 mod totp;
 mod users;
 
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 use askama::Template;
 use axum::{
-    Form, Router,
-    extract::State,
-    http::{HeaderMap, StatusCode},
+    Form, Json, Router,
+    extract::{Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -16,9 +17,11 @@ use axum_extra::extract::{
     CookieJar,
     cookie::{Cookie, SameSite},
 };
+use base64::Engine;
 use color_eyre::Result;
 use color_eyre::eyre::Context;
 use serde::Deserialize;
+use serde_json::json;
 use session::UserSession;
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 use tracing::{error, info, level_filters::LevelFilter};
@@ -66,9 +69,21 @@ async fn main() -> Result<()> {
         .route("/2fa/delete", post(delete_2fa))
         .route("/add-totp", get(add_totp).post(add_totp_post))
         .route("/users", get(users))
+        .route(
+            "/.well-known/openid-configuration",
+            get(openid_configuration),
+        )
+        .route("/oauth-clients", get(oauth_clients))
+        .route(
+            "/add-oauth-client",
+            get(add_oauth_client).post(add_oauth_client_post),
+        )
+        .route("/connect/authorize", get(connect_authorize))
+        .route("/connect/token", post(connect_token))
+        .route("/jwks.json", get(jwks))
         .with_state(Db { pool });
 
-    let addr = "0.0.0.0:3000";
+    let addr = "0.0.0.0:2999";
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .wrap_err("binding listener")?;
@@ -509,4 +524,273 @@ async fn login_2fa_post(
     }
 
     Ok(Redirect::to("/"))
+}
+
+async fn openid_configuration() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "issuer": "http://localhost:2999",
+        "authorization_endpoint": "http://localhost:2999/connect/authorize",
+        "token_endpoint": "http://localhost:2999/connect/token",
+        "userinfo_endpoint": "http://localhost:2999/connect/userinfo",
+        "jwks_uri": "http://localhost:2999/jwks.json",
+        "response_types_supported": ["id_token"],
+        "grant_types_supported": ["authorization_code"],
+        "id_token_signing_alg_values_supported": ["RS256"]
+    }))
+}
+
+async fn oauth_clients(State(db): State<Db>) -> Result<impl IntoResponse, Response> {
+    let clients = oidc::list_oauth_clients(&db).await.map_err(|err| {
+        error!(?err, "Failed to list oauth clients");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })?;
+
+    #[derive(askama::Template)]
+    #[template(path = "oauth-clients.html")]
+    struct OAuthClientsTemplate {
+        clients: Vec<oidc::OAuthClient>,
+    }
+
+    Ok(Html(OAuthClientsTemplate { clients }.render().unwrap()))
+}
+
+#[derive(askama::Template)]
+#[template(path = "add-oauth-client.html")]
+struct AddOAuthClientTemplate {
+    error: Option<String>,
+}
+
+async fn add_oauth_client() -> impl IntoResponse {
+    Html(AddOAuthClientTemplate { error: None }.render().unwrap())
+}
+
+#[derive(Deserialize)]
+struct AddOAuthClientForm {
+    app_name: String,
+    redirect_uri: String,
+    client_type: String,
+}
+
+async fn add_oauth_client_post(
+    State(db): State<Db>,
+    Form(form): Form<AddOAuthClientForm>,
+) -> Result<impl IntoResponse, Response> {
+    if let Err(err) = url::Url::parse(&form.redirect_uri) {
+        return Err(Html(
+            AddOAuthClientTemplate {
+                error: Some(format!("invalid redirect URI: {err}")),
+            }
+            .render()
+            .unwrap(),
+        )
+        .into_response());
+    }
+
+    oidc::insert_oauth_client(&db, &form.app_name, &form.redirect_uri, &form.client_type)
+        .await
+        .map_err(|err| {
+            error!(?err, "Failed to add oauth client");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    Ok(Redirect::to("/oauth-clients"))
+}
+
+#[derive(Deserialize)]
+struct AuthorizeQuery {
+    client_id: String,
+    scope: String,
+    response_type: String,
+    redirect_uri: Option<String>,
+    state: Option<String>,
+}
+
+async fn connect_authorize(
+    user: UserSession,
+    Query(query): Query<AuthorizeQuery>,
+    State(db): State<Db>,
+) -> Result<impl IntoResponse, Response> {
+    let Some(user) = user.0 else {
+        return Err(Redirect::to("/login").into_response());
+    };
+
+    let clients = oidc::list_oauth_clients(&db).await.map_err(|err| {
+        error!(?err, "Failed to add oauth client");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })?;
+    let Some(client) = clients
+        .iter()
+        .find(|client| client.client_id == query.client_id)
+    else {
+        return Err("invalid client_id".into_response());
+    };
+
+    if query
+        .redirect_uri
+        .is_some_and(|redirect_uri| redirect_uri != client.redirect_uri)
+    {
+        return Err("invalid redirect_uri".into_response());
+    }
+
+    if query.response_type != "code" {
+        return Err("unsupported response type, must be 'code'".into_response());
+    }
+
+    let mut redirect_uri = url::Url::parse(&client.redirect_uri).map_err(|err| {
+        error!(?err, "invalid redirect URI");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })?;
+
+    let code = oidc::generate_string(32);
+    oidc::insert_code(&db, &code, &query.client_id, user.user_id)
+        .await
+        .map_err(|err| {
+            error!(?err, "Failed to insert oauth authorization code");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    redirect_uri.query_pairs_mut().append_pair("code", &code);
+
+    if let Some(state) = query.state {
+        redirect_uri.query_pairs_mut().append_pair("state", &state);
+    }
+
+    Ok(Redirect::to(redirect_uri.as_str()))
+}
+
+#[derive(Deserialize)]
+struct ConnectTokenForm {
+    grant_type: String,
+    code: String,
+}
+
+async fn connect_token(
+    headers: HeaderMap,
+    State(db): State<Db>,
+    Form(form): Form<ConnectTokenForm>,
+) -> Result<impl IntoResponse, Response> {
+    fn authorization(headers: HeaderMap) -> Option<(String, String)> {
+        let auth = str::from_utf8(headers.get(header::AUTHORIZATION)?.as_bytes()).ok()?;
+        let token = auth.strip_prefix("Basic ")?;
+        let parts = base64::prelude::BASE64_STANDARD.decode(token).ok()?;
+        let mut parts = str::from_utf8(&parts).ok()?.split(':');
+        let username = parts.next()?;
+        let password = parts.next()?;
+        if !parts.next().is_none() {
+            return None;
+        }
+        Some((username.to_owned(), password.to_owned()))
+    }
+
+    let Some(auth) = authorization(headers) else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": "invalid_client"
+            })),
+        )
+            .into_response());
+    };
+
+    if form.grant_type != "authorization_code" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_grant"
+            })),
+        )
+            .into_response());
+    }
+
+    let code = oidc::find_code(&db, &form.code, &auth.0, &auth.1)
+        .await
+        .map_err(|err| {
+            error!(?err, "Error finding oauth code");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    let Some(code) = code else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "unauthorized_client"
+            })),
+        )
+            .into_response());
+    };
+
+    oidc::mark_code_as_used(&db, &form.code)
+        .await
+        .map_err(|err| {
+            error!(?err, "Error finding oauth code");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    // TODO verify redirect_uri if present
+
+    // fun https://datatracker.ietf.org/doc/html/rfc7519
+    let id_token_headers = base64::prelude::BASE64_URL_SAFE.encode(
+        serde_json::to_string(&json!({
+            "typ": "JWT",
+            "alg": "RS256"
+        }))
+        .unwrap(),
+    );
+
+    let id_token_body = base64::prelude::BASE64_URL_SAFE.encode( serde_json::to_string(&json!({
+        "iss": "http://localhost:2999",
+        "sub": code.user_id.to_string(),
+        "aud": auth.0.to_string(),
+        "exp": jiff::Timestamp::now().checked_add(Duration::from_secs(3600)).unwrap().as_second(),
+        "iat": jiff::Timestamp::now().as_second(),
+    }))
+    .unwrap());
+
+    let id_token_signature = "yeet";
+
+    let id_token = format!("{id_token_headers}.{id_token_body}.{id_token_signature}");
+
+    Ok((
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(json!({
+            "access_token": "",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "id_token": id_token
+        })),
+    ))
+}
+
+fn rsa_key() -> serde_json::Value {
+    json!({
+      "kty": "RSA",
+      "use": "sig",
+      "alg": "RS256",
+      "kid": "1",
+      "d": "BgjgM5QdqgFmL4DaDQuFW-cLpkUBsvxX2rr4-vy-d71puXN-x8T_NBfZ3oBcjpl2Aghc23ahD5gsiRBqka7BvP30NfHXEjMgBArgYowAM7Qp_e22yiBsAhU1F19ffhymu_1wAngRqHF9kPR8X3_noekffX5KwE660DkYM5l4S6O6TJfZdiynWJrM6PcZqIRRE7ughLEQpfStnDcgmtCgeoGESimnV-8WKD1PQAdJr4oj4hdFLQzXxygVKy1gilWdbMt8R-gUE6Vl22I0Bsw-LY71fG2Yw08_poNStuZ4ZRzLaGuYh5JjM4oUPWn7z-iJoUZmSfwq-zAKRhVNMGwwk79vhCSbd5pKKeCtApvztl7x8HY71M-UY5m4XyZ0aO4d9VkwzpOD9KbaDW4SIoeaYPLZFkVAVsthrh0fTblWV6w1Ko-h8M5IxDvdz8JSvkkxJlz-wucMe86RzeZ4dMOQEM2zv3To6Ru6nPXwzN5YGCvvGNUJGAPbrNDRAq4GVNKlIBPJUK0KkLHDzHuvsK-m30wOFmUlSpely-M9Rhq4wVBhg_o7zeeUCe9aNaeqTtwol7SO23n2qqzznoPUOQEIJg8h2lLW5gh-uNbRRfQh2oOvFsQVQZPZDtaxs7XhZYywxe3XiZ5wP4J3S8gyb9an6zvGsYAHKt7tg69LdrAv6JE",
+      "n": "o36zvtfPixDY1T_Eg2TlzJwn7kpJ3iOlvFtn0FkM20PHlC8DM_A6iGtOdNwGPWH0uoJ5r03W9knh3S1cnFf9Apz3NJoxvmgojNjIYPrkxU3AgzJYPpE2Icg_Iqe5dqY9qQbg-3Uqfdih9x2qs02xPmnD9FX1ewYmn15WpDYsWpeKWi6SC91y9R15kpL02PJOG2DcKGHte25VZIJ3ysrnrGULgF1J7kQp1j87TMho266pj_GHmcV1XThw8mfk4JXUBMC47KvdQkyRR6cKlT9IeMPk18s2LKk3UsFflkvpGMi04l5Jx8vNZ_QfsewFtA1JG5_ce3HeRzmepoeYeF4U9ClDRKRslqOBPcx-aMB3gE6nwMA2JYt8xtCxjoptSfZAeyoOLd4s739tpxwjpiXzcuNOCvhYN_zOzdaMZCTJJ1E5UQpDdw8-9u3ZR7ZPlJFY6uVA6EJ6kOz4EKBPw2A_MWoRS0SjFokPGWfOaaccONNE8Gks2tWZtGxFXXW63JTS8T9LcZ-6mwan4XRhVGUUynBCLsv6wplVhH1kOkbIXDpyfpembOhdFQe9NuwZpdutIbi2DPFfYmrEr3xyGEteR69WGo7OyIGGL6His46xs5YBj_X3_aDltz-jYI11OdfQj2XmiBI8PIAzgYKULLPfrupgFaswsJzPVUK8vrpdE58",
+      "e": "AQAB",
+      "p": "wyT2tVnlFA_mAD3SatHxaoD5OsE7kzxQb9rNx1PZ5GiK9fcyRE6xfS4pv_5RsvqHgwgZYNaydMytsg7Uq2gcQCA7gAyKD56ROw6nQCt2Tnv2US1Lu4s_DnUlQYdAaWwOYWCSOyrMH1TxtgCzveT9qO1PAknzyWJyb4wm9JMyzFdKh_Ck3nCO9_YhwmhYg3H1eT2cB-mdIG2ULc7yB8gvLccOqDea_C0LNur_iPTs9xwQnIOkD3GSKetWaHyXq2EnhFCoPStWZjUmItIrbEelcFOIIXTUWKk5eAQtOfmBjrEEimHktmVZNSppooD8zYq9cIxjyfjMfeneBDtGdK_xCQ",
+      "q": "1nsOGyOanwY5-JtAnf_m3wnzbAbY40bLB6DLQe3LqWb4Ow7b0XpSdEHJwV0_8jA1pNi3PouSDHSvj8G7Af9BncL2w9aTO1v6G_sHvHbP2U49RHrpRepBWrCWd2dV_CJdKJef4s2xURk44tPebZyPggvGo77qVWBal-MRkQcwnJHMgaht5QisP1LLSPjWswMkPQkuoIqqZlhFtgIkyz0hLqil1CbylU7i1ExXko8GT2fp8AG5iwdAJ6FrwyIuDTAgI2kx5tVpEdFfRDY7J2icbhvVVOFihkpjWUp-nVcp1K1ksaqU9_N3lu902L_lYusFMTxvqQ7yL5OYY4e3K-WRZw",
+      "dp": "PbJCDbQOKPmdzhW9oOgfW3zLTzgojbRT-glDZfGswfoLdRhiXBZFJz6hFIJjciKjFVpKK8O1SBguEk1-D3Mq-1s1dJaCT83iPLm1RyR2kvm-NowLlY_Ar-F5le4c_zealE7j7LDrODyy7sfqC--KAw6EHEUlPlZRt9KnvkuLk-9FMRV0Cp-rk9nNcplq4qP06BACdL33X3lFj_YNr0grIl381FJAPdo_4W0KvVIyWS4WUmWMSRWvEHHHL-G0Ugq1Y6_cgPpipo3HMNshv2ondAv0zh8Rw7Y85STs55dqzqJIvTeWB9SjD5wJKcd-Jb3nht3b7s8qV-TIvK3A6MN3gQ",
+      "dq": "Gl1WBpAB2bpyNdUfxExInPIkMgtFbeqt2moxkhEhD9nQebIB42Yd7JyJqHNGAQdcEL9zBwUxFsbhLdKqojw2XKYynzApOQq9W-MnuEsCkbvEXD6fnjCFiBhc5qCVOUEgInVA-ig-u7FWBMv2c5LjMSExcb9uHsCRYkpPRnyTxStG8Ek7-QNv6PjMdFPiUG76bWZLjQB-ocYIC6-HxlPlWE7y03lWKHRh_abEvQdHx0sGvrH3lNd3U2fMT1hMQOLBkJjFwZJKMB6Ej2X7L4T0dbSGLMDn04ohXECD_-NPCQ2naw-E8FXFRZB51IsCL36kTMEZGLb1nlOOT-3G3maB0Q",
+      "qi": "gakrrA_MsPcjAFsE_I9amgoTI4pLe3Da3WAA24iBMNBv6M0xZV7GGKv0pMvSfZzsQeQH4eqZwbSRjLeUz9dU4eW02k9RvfASImvyCyhstAj6oGtrqcKuPOR9n4Wci0tXbRawbXhDR7y6Kyj7LHEketqJGVciGmYgcZEC017LOR0lJhcb_WwgcFnqBa2qx6wYknI6EsTyaxjJzTm1bPusi8oe5RQ_-SqG36yfPBdjNLDm0XvNRXZkQC26MzESL4AU-dakUvFsUl7WG8lIevponmooNlR0KTVmCJE9fM5H8dap_CyrPfDtUxm75YBPuk5EvZNShyo6JdN7eltT-5JRCQ"
+    })
+}
+
+async fn jwks() -> impl IntoResponse {
+    // https://datatracker.ietf.org/doc/html/rfc7517
+
+    let key = rsa_key();
+
+    Json(json!({
+        "keys": [{
+            "kty": "RSA",
+            "use": "sig",
+            "alg": "RS256",
+            "kid": "1",
+            "n": key["n"],
+            "e": key["e"]
+        }],
+    }))
 }

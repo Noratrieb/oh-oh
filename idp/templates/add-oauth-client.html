@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Login - IDP</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <h1>Register a new OAuth client</h1>
+    <a href="/">home</a>
+    <form method="post">
+      <div>
+        <label for="app_name">App Name</label>
+        <input id="app_name" name="app_name" />
+      </div>
+
+      <div>
+        <label for="redirect_uri">Redirect URI</label>
+        <input id="redirect_uri" name="redirect_uri" />
+      </div>
+
+      <div>
+        <label for="client_type">Client Type</label>
+        <select id="client_type" name="client_type">
+          <option value="confidential">confidential</option>
+          <option value="private">private</option>
+        </select>
+      </div>
+
+      <button type="submit">Create</button>
+
+      {% if let Some(error) = error %}
+      <p>error: {{error}}</p>
+      {% endif %}
+    </form>
+  </body>
+</html>
