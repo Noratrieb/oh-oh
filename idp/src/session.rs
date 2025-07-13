@@ -22,7 +22,7 @@ pub struct SessionId(pub String);
 
 pub async fn find_session(db: &Db, session_id: &str) -> Result<Option<SessionWithUser>> {
     let result = sqlx::query_as::<_, SessionWithUser>(
-        "select user_id, created, username from sessions left join users on sessions.user_id = users.id where session_id = ?",
+        "select user_id, created, username from sessions left join users on sessions.user_id = users.id where session_id = ? and locked_2fa = false",
     )
     .bind(session_id)
     .fetch_one(&db.pool)
@@ -32,6 +32,35 @@ pub async fn find_session(db: &Db, session_id: &str) -> Result<Option<SessionWit
         Err(sqlx::Error::RowNotFound) => Ok(None),
         Err(e) => Err(e).wrap_err("failed to fetch session"),
     }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct LockedSession {
+    pub user_id: i64,
+    pub session_id: String,
+}
+
+pub async fn find_locked_session(db: &Db, session_id: &str) -> Result<Option<LockedSession>> {
+    let result = sqlx::query_as::<_, LockedSession>(
+        "select user_id, session_id from sessions where session_id = ? and locked_2fa = true",
+    )
+    .bind(session_id)
+    .fetch_one(&db.pool)
+    .await;
+    match result {
+        Ok(session) => Ok(Some(session)),
+        Err(sqlx::Error::RowNotFound) => Ok(None),
+        Err(e) => Err(e).wrap_err("failed to fetch locked session"),
+    }
+}
+
+pub async fn unlock_session(db: &Db, session_id: &str) -> Result<()> {
+    sqlx::query("update sessions set locked_2fa = false where session_id = ?")
+        .bind(session_id)
+        .execute(&db.pool)
+        .await
+        .wrap_err("unlocking session")?;
+    Ok(())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -61,18 +90,24 @@ pub async fn delete_session(db: &Db, user_id: i64, session_public_id: i64) -> Re
     Ok(())
 }
 
-pub async fn create_session(db: &Db, user_id: i64, user_agent: &str) -> Result<SessionId> {
+pub async fn create_session(
+    db: &Db,
+    user_id: i64,
+    user_agent: &str,
+    locked_2fa: bool,
+) -> Result<SessionId> {
     let mut session_id = [0_u8; 32];
     rand_core::OsRng.fill_bytes(&mut session_id);
     let session_id = format!("idpsess_{}", hex::encode(session_id));
 
     sqlx::query(
-        "insert into sessions (session_id, user_id, created, user_agent) values (?, ?, ?, ?)",
+        "insert into sessions (session_id, user_id, created, user_agent, locked_2fa) values (?, ?, ?, ?, ?)",
     )
     .bind(&session_id)
     .bind(user_id)
     .bind(jiff::Timestamp::now().as_millisecond())
     .bind(user_agent)
+    .bind(locked_2fa)
     .execute(&db.pool)
     .await
     .wrap_err("inserting new session")?;

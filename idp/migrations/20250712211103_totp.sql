@@ -1,8 +1,8 @@
 CREATE TABLE IF NOT EXISTS used_totp (
     user_id INTEGER,
-    code TEXT,
+    time_step INTEGER,
 
-    PRIMARY KEY (user_id, code),
+    PRIMARY KEY (user_id, time_step),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) STRICT;
 

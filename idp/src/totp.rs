@@ -13,7 +13,6 @@ mod compute {
     }
 
     struct TotpConfig {
-        time_step_s: u64,
         digits: u32,
     }
 
@@ -42,23 +41,19 @@ mod compute {
     }
 
     impl Totp {
-        pub fn compute(secret: &str, unix_seconds: u64) -> Self {
+        pub fn time_step(unix_seconds: i64) -> i64 {
+            unix_seconds / 30
+        }
+
+        pub fn compute(secret: &str, time_step: i64) -> Self {
             let secret = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &secret)
                 .unwrap_or_default(); // nonsense secret will result in the wrong code as intended
 
-            Self::compute_inner(
-                &secret,
-                unix_seconds,
-                TotpConfig {
-                    time_step_s: 30,
-                    digits: 6,
-                },
-            )
+            Self::compute_inner(&secret, time_step, TotpConfig { digits: 6 })
         }
 
-        fn compute_inner(secret: &[u8], unix_seconds: u64, config: TotpConfig) -> Self {
-            let time_step = unix_seconds / config.time_step_s;
-            let code = hotp(secret, time_step, config.digits);
+        fn compute_inner(secret: &[u8], time_step: i64, config: TotpConfig) -> Self {
+            let code = hotp(secret, time_step as u64, config.digits);
             Totp { digits: code }
         }
     }
@@ -80,11 +75,8 @@ mod compute {
             for test in tests {
                 let totp = super::Totp::compute_inner(
                     secret,
-                    test.0,
-                    TotpConfig {
-                        time_step_s: 30,
-                        digits: 8,
-                    },
+                    super::Totp::time_step(test.0),
+                    TotpConfig { digits: 8 },
                 );
                 assert_eq!(totp.digits, test.1);
             }
@@ -118,11 +110,12 @@ pub struct TotpDevice {
     pub id: i64,
     pub created_time: i64,
     pub name: String,
+    pub secret: String,
 }
 
 pub async fn list_totp_devices(db: &Db, user_id: i64) -> Result<Vec<TotpDevice>> {
     sqlx::query_as::<_, TotpDevice>(
-        "select id, created_time, name from totp_devices where user_id = ?",
+        "select id, created_time, name, secret from totp_devices where user_id = ?",
     )
     .bind(user_id)
     .fetch_all(&db.pool)
@@ -137,5 +130,31 @@ pub async fn delete_totp_device(db: &Db, user_id: i64, totp_device_id: i64) -> R
         .execute(&db.pool)
         .await
         .wrap_err("failed to delete totp device")?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+pub struct UsedTotp {
+    pub has_used: i64,
+}
+
+pub async fn find_used_totp(db: &Db, user_id: i64, time_step: i64) -> Result<UsedTotp> {
+    sqlx::query_as::<_, UsedTotp>(
+        "select COUNT(time_step) as has_used from used_totp where user_id = ? and time_step = ?",
+    )
+    .bind(user_id)
+    .bind(time_step)
+    .fetch_one(&db.pool)
+    .await
+    .wrap_err("fetching totp devices")
+}
+
+pub async fn insert_used_totp_code(db: &Db, user_id: i64, time_step: i64) -> Result<()> {
+    sqlx::query("insert into used_totp (user_id, time_step) values (?, ?)")
+        .bind(user_id)
+        .bind(time_step)
+        .execute(&db.pool)
+        .await
+        .wrap_err("failed to insert used totp code")?;
     Ok(())
 }

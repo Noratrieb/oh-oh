@@ -11,19 +11,18 @@
     <a href="/">home</a>
     <form method="post">
       <div>
-        <label for="username">Username</label>
-        <input id="username" name="username" />
-      </div>
-
-      <div>
-        <label for="password">Password</label>
-        <input id="password" name="password" />
+        <label for="totp_code">2FA code</label>
+        <input id="totp_code" name="totp_code" />
       </div>
 
       <button type="submit">Login</button>
 
       {% if error %}
-      <p>Invalid username or password.</p>
+      <p>Incorrect 2FA code.</p>
+      {% endif %}
+      <!---->
+      {% if reuse %}
+      <p>2FA code reused, wait 30s for the next one</p>
       {% endif %}
     </form>
   </body>

@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
         .route("/", get(root))
         .route("/signup", get(signup).post(signup_post))
         .route("/login", get(login).post(login_post))
+        .route("/login-2fa", get(login_2fa).post(login_2fa_post))
         .route("/2fa", get(list_2fa))
         .route("/sessions", get(list_sessions))
         .route("/sessions/delete", post(delete_session))
@@ -132,6 +133,25 @@ struct AddTotpTemplate {
 #[axum::debug_handler]
 async fn login() -> impl IntoResponse {
     Html(LoginTemplate { error: false }.render().unwrap())
+}
+
+#[derive(askama::Template)]
+#[template(path = "login-2fa.html")]
+struct Login2faTemplate {
+    error: bool,
+    reuse: bool,
+}
+
+#[axum::debug_handler]
+async fn login_2fa() -> impl IntoResponse {
+    Html(
+        Login2faTemplate {
+            error: false,
+            reuse: false,
+        }
+        .render()
+        .unwrap(),
+    )
 }
 
 async fn list_2fa(user: UserSession, State(db): State<Db>) -> Result<impl IntoResponse, Response> {
@@ -217,6 +237,8 @@ async fn delete_2fa(
         return Err(Redirect::to("/").into_response());
     };
 
+    // TODO: This should require 2FA authentication
+
     totp::delete_totp_device(&db, user.user_id, form.device_id)
         .await
         .map_err(|err| {
@@ -257,7 +279,10 @@ async fn add_totp_post(
         return Err(Redirect::to("/").into_response());
     };
 
-    let computed = totp::Totp::compute(&form.secret, jiff::Timestamp::now().as_second() as u64);
+    let computed = totp::Totp::compute(
+        &form.secret,
+        totp::Totp::time_step(jiff::Timestamp::now().as_second()),
+    );
 
     if computed.digits != form.code.trim() {
         return Err(Html(
@@ -307,8 +332,9 @@ async fn make_session_cookie_for_user(
     db: &Db,
     user_id: i64,
     user_agent: &str,
+    locked_2fa: bool,
 ) -> Result<Cookie<'static>, Response> {
-    let session = session::create_session(&db, user_id, user_agent)
+    let session = session::create_session(&db, user_id, user_agent, locked_2fa)
         .await
         .map_err(|err| {
             error!(?err, "Failed to create session for user");
@@ -356,7 +382,7 @@ async fn signup_post(
         .and_then(|v| str::from_utf8(v.as_bytes()).ok())
         .unwrap_or("unknown");
 
-    let session_id = make_session_cookie_for_user(&db, user.id, user_agent).await?;
+    let session_id = make_session_cookie_for_user(&db, user.id, user_agent, false).await?;
 
     Ok((jar.add(session_id), Redirect::to("/")))
 }
@@ -378,12 +404,107 @@ async fn login_post(
         return Err(Html(LoginTemplate { error: true }.render().unwrap()).into_response());
     };
 
+    let totp_devices = totp::list_totp_devices(&db, user.id).await.map_err(|err| {
+        error!(?err, "Failed to list totp devices");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })?;
+
+    let locked_2fa = !totp_devices.is_empty();
+
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| str::from_utf8(v.as_bytes()).ok())
         .unwrap_or("unknown");
 
-    let session_id = make_session_cookie_for_user(&db, user.id, user_agent).await?;
+    let session_id = make_session_cookie_for_user(&db, user.id, user_agent, locked_2fa).await?;
 
-    Ok((jar.add(session_id), Redirect::to("/")))
+    let redirect_target = if locked_2fa { "/login-2fa" } else { "/" };
+
+    Ok((jar.add(session_id), Redirect::to(redirect_target)))
+}
+
+#[derive(Deserialize)]
+struct Login2faForm {
+    totp_code: String,
+}
+
+async fn login_2fa_post(
+    State(db): State<Db>,
+    jar: CookieJar,
+    Form(form): Form<Login2faForm>,
+) -> Result<impl IntoResponse, Response> {
+    let now = jiff::Timestamp::now();
+
+    let Some(session_id) = jar.get(crate::SESSION_ID_COOKIE_NAME) else {
+        return Err(Redirect::to("/").into_response());
+    };
+
+    let session = session::find_locked_session(&db, session_id.value())
+        .await
+        .map_err(|err| {
+            error!(?err, "Failed to find locked session");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    let Some(session) = session else {
+        return Err(Redirect::to("/").into_response());
+    };
+
+    let totp_devices = totp::list_totp_devices(&db, session.user_id)
+        .await
+        .map_err(|err| {
+            error!(?err, "Failed to list totp devices");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    let time_step = now.as_second() / 30;
+    let used = totp::find_used_totp(&db, session.user_id, time_step)
+        .await
+        .map_err(|err| {
+            error!(?err, "Failed to find used totp");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    if used.has_used > 0 {
+        return Err(Html(
+            Login2faTemplate {
+                error: false,
+                reuse: true,
+            }
+            .render()
+            .unwrap(),
+        )
+        .into_response());
+    }
+
+    let code_matches = totp_devices.iter().any(|device| {
+        totp::Totp::compute(&device.secret, time_step).digits == form.totp_code.trim()
+    });
+
+    if code_matches {
+        totp::insert_used_totp_code(&db, session.user_id, time_step)
+            .await
+            .map_err(|err| {
+                error!(?err, "Failed to insert used totp");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            })?;
+        session::unlock_session(&db, &session.session_id)
+            .await
+            .map_err(|err| {
+                error!(?err, "Failed to unlock session");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            })?;
+    } else {
+        return Err(Html(
+            Login2faTemplate {
+                error: true,
+                reuse: false,
+            }
+            .render()
+            .unwrap(),
+        )
+        .into_response());
+    }
+
+    Ok(Redirect::to("/"))
 }

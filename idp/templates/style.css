@@ -44,12 +44,12 @@ a[href="/"] {
   margin-bottom: 20px;
 }
 
-form + :not(.fake-form) {
+form:not(.fake-form) {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
 .fake-form {
-    display: inline-block;
+  display: inline-block;
 }
