@@ -18,6 +18,11 @@
     </div>
     {% if let Some(username) = username %}
     <p>Hello, {{username}}!</p>
+    <div>
+      <form action="/logout" method="post">
+        <button type="submit">Logout</button>
+      </form>
+    </div>
     {% endif %}
     <p>Login</p>
     <div>

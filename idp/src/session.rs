@@ -16,13 +16,14 @@ pub struct SessionWithUser {
     #[expect(dead_code)]
     pub created: i64,
     pub username: String,
+    pub session_public_id: i64,
 }
 
 pub struct SessionId(pub String);
 
 pub async fn find_session(db: &Db, session_id: &str) -> Result<Option<SessionWithUser>> {
     let result = sqlx::query_as::<_, SessionWithUser>(
-        "select user_id, created, username from sessions left join users on sessions.user_id = users.id where session_id = ? and locked_2fa = false",
+        "select user_id, session_public_id, created, username from sessions left join users on sessions.user_id = users.id where session_id = ? and locked_2fa = false",
     )
     .bind(session_id)
     .fetch_one(&db.pool)

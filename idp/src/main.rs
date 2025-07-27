@@ -60,6 +60,7 @@ async fn main() -> Result<()> {
     let app = Router::<Db>::new()
         .route("/style.css", get(style_css))
         .route("/", get(root))
+        .route("/logout", post(logout))
         .route("/signup", get(signup).post(signup_post))
         .route("/login", get(login).post(login_post))
         .route("/login-2fa", get(login_2fa).post(login_2fa_post))
@@ -167,6 +168,26 @@ async fn login_2fa() -> impl IntoResponse {
         .render()
         .unwrap(),
     )
+}
+
+async fn logout(
+    State(db): State<Db>,
+
+    jar: CookieJar,
+    user: UserSession,
+) -> Result<Response, Response> {
+    let Some(user) = user.0 else {
+        return Ok(Redirect::to("/").into_response());
+    };
+
+    session::delete_session(&db, user.user_id, user.session_public_id)
+        .await
+        .map_err(|err| {
+            error!(?err, "Error deleting session for logout");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+    Ok((jar.remove(SESSION_ID_COOKIE_NAME), Redirect::to("/")).into_response())
 }
 
 async fn list_2fa(user: UserSession, State(db): State<Db>) -> Result<impl IntoResponse, Response> {
