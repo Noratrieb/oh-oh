@@ -52,15 +52,16 @@ pub async fn list_oauth_clients(db: &Db) -> Result<Vec<OAuthClient>> {
     .wrap_err("fetching oauth clients")
 }
 
-pub async fn insert_code(db: &Db, code: &str, client_id: &str, user_id: i64) -> Result<()> {
+pub async fn insert_code(db: &Db, code: &str, client_id: &str, user_id: i64, scope: &str) -> Result<()> {
     sqlx::query(
-        "insert into oauth_codes (code, client_id, created_time_ms, user_id)\
-        values (?, ?, ?, ?)",
+        "insert into oauth_codes (code, client_id, created_time_ms, user_id, scope)\
+        values (?, ?, ?, ?, ?)",
     )
     .bind(code)
     .bind(client_id)
     .bind(jiff::Timestamp::now().as_millisecond())
     .bind(user_id)
+    .bind(scope)
     .execute(&db.pool)
     .await
     .wrap_err("inserting oauth client")?;
@@ -70,6 +71,7 @@ pub async fn insert_code(db: &Db, code: &str, client_id: &str, user_id: i64) -> 
 #[derive(sqlx::FromRow)]
 pub struct OAuthCode {
     pub user_id: i64,
+    pub scope: String,
 }
 
 pub async fn find_code(
@@ -83,7 +85,7 @@ pub async fn find_code(
         .unwrap()
         .as_millisecond();
     let result = sqlx::query_as::<_, OAuthCode>(
-        "select user_id from oauth_codes \
+        "select user_id, scope from oauth_codes \
         inner join oauth_clients on oauth_clients.client_id = oauth_codes.client_id and oauth_clients.client_secret = ? \
         where code = ? and oauth_codes.client_id = ? and created_time_ms > ? and used = 0",
     )

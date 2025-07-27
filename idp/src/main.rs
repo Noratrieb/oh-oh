@@ -17,7 +17,7 @@ use axum_extra::extract::{
     CookieJar,
     cookie::{Cookie, SameSite},
 };
-use base64::Engine;
+use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use color_eyre::Result;
 use color_eyre::eyre::Context;
 use serde::Deserialize;
@@ -642,7 +642,7 @@ async fn connect_authorize(
     })?;
 
     let code = oidc::generate_string(32);
-    oidc::insert_code(&db, &code, &query.client_id, user.user_id)
+    oidc::insert_code(&db, &code, &query.client_id, user.user_id, &query.scope)
         .await
         .map_err(|err| {
             error!(?err, "Failed to insert oauth authorization code");
@@ -726,10 +726,21 @@ async fn connect_token(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         })?;
 
+    let scopes = code.scope.split(' ').collect::<Vec<_>>();
+    if !scopes.contains(&"openid") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_grant"
+            })),
+        )
+            .into_response());
+    }
+
     // TODO verify redirect_uri if present
 
     // fun https://datatracker.ietf.org/doc/html/rfc7519
-    let id_token_headers = base64::prelude::BASE64_URL_SAFE.encode(
+    let id_token_headers = BASE64_URL_SAFE_NO_PAD.encode(
         serde_json::to_string(&json!({
             "typ": "JWT",
             "alg": "RS256",
@@ -738,7 +749,7 @@ async fn connect_token(
         .unwrap(),
     );
 
-    let id_token_body = base64::prelude::BASE64_URL_SAFE.encode( serde_json::to_string(&json!({
+    let id_token_body = BASE64_URL_SAFE_NO_PAD.encode( serde_json::to_string(&json!({
         "iss": "http://localhost:2999",
         "sub": code.user_id.to_string(),
         "aud": auth.0.to_string(),
@@ -747,9 +758,23 @@ async fn connect_token(
     }))
     .unwrap());
 
-    let id_token_signature = "yeet";
+    use rsa::signature::{RandomizedSigner, SignatureEncoding};
 
-    let id_token = format!("{id_token_headers}.{id_token_body}.{id_token_signature}");
+    let p = rsa::BigUint::from_bytes_be(&BASE64_URL_SAFE_NO_PAD.decode(RSA_KEY_P).unwrap());
+    let q = rsa::BigUint::from_bytes_be(&BASE64_URL_SAFE_NO_PAD.decode(RSA_KEY_Q).unwrap());
+
+    let key = rsa::RsaPrivateKey::from_p_q(p, q, rsa::BigUint::from(65537_u32)).unwrap();
+    let key = rsa::pkcs1v15::SigningKey::<rsa::sha2::Sha256>::new(key);
+
+    let payload = format!("{id_token_headers}.{id_token_body}");
+
+    let signature = key.sign_with_rng(&mut rand_core::OsRng, &payload.as_bytes());
+
+    let id_token_signature = BASE64_URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+    let id_token = format!("{payload}.{id_token_signature}");
+
+    dbg!(&id_token);
 
     Ok((
         [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
@@ -757,11 +782,16 @@ async fn connect_token(
             "access_token": "",
             "token_type": "Bearer",
             "expires_in": 3600,
-            "id_token": id_token
+            "id_token": id_token,
+            "scope": scopes
         })),
     ))
 }
 
+const RSA_KEY_P: &str = "wyT2tVnlFA_mAD3SatHxaoD5OsE7kzxQb9rNx1PZ5GiK9fcyRE6xfS4pv_5RsvqHgwgZYNaydMytsg7Uq2gcQCA7gAyKD56ROw6nQCt2Tnv2US1Lu4s_DnUlQYdAaWwOYWCSOyrMH1TxtgCzveT9qO1PAknzyWJyb4wm9JMyzFdKh_Ck3nCO9_YhwmhYg3H1eT2cB-mdIG2ULc7yB8gvLccOqDea_C0LNur_iPTs9xwQnIOkD3GSKetWaHyXq2EnhFCoPStWZjUmItIrbEelcFOIIXTUWKk5eAQtOfmBjrEEimHktmVZNSppooD8zYq9cIxjyfjMfeneBDtGdK_xCQ";
+const RSA_KEY_Q: &str = "1nsOGyOanwY5-JtAnf_m3wnzbAbY40bLB6DLQe3LqWb4Ow7b0XpSdEHJwV0_8jA1pNi3PouSDHSvj8G7Af9BncL2w9aTO1v6G_sHvHbP2U49RHrpRepBWrCWd2dV_CJdKJef4s2xURk44tPebZyPggvGo77qVWBal-MRkQcwnJHMgaht5QisP1LLSPjWswMkPQkuoIqqZlhFtgIkyz0hLqil1CbylU7i1ExXko8GT2fp8AG5iwdAJ6FrwyIuDTAgI2kx5tVpEdFfRDY7J2icbhvVVOFihkpjWUp-nVcp1K1ksaqU9_N3lu902L_lYusFMTxvqQ7yL5OYY4e3K-WRZw";
+
+// https://datatracker.ietf.org/doc/html/rfc7517
 fn rsa_key() -> serde_json::Value {
     json!({
       "kty": "RSA",
@@ -771,8 +801,8 @@ fn rsa_key() -> serde_json::Value {
       "d": "BgjgM5QdqgFmL4DaDQuFW-cLpkUBsvxX2rr4-vy-d71puXN-x8T_NBfZ3oBcjpl2Aghc23ahD5gsiRBqka7BvP30NfHXEjMgBArgYowAM7Qp_e22yiBsAhU1F19ffhymu_1wAngRqHF9kPR8X3_noekffX5KwE660DkYM5l4S6O6TJfZdiynWJrM6PcZqIRRE7ughLEQpfStnDcgmtCgeoGESimnV-8WKD1PQAdJr4oj4hdFLQzXxygVKy1gilWdbMt8R-gUE6Vl22I0Bsw-LY71fG2Yw08_poNStuZ4ZRzLaGuYh5JjM4oUPWn7z-iJoUZmSfwq-zAKRhVNMGwwk79vhCSbd5pKKeCtApvztl7x8HY71M-UY5m4XyZ0aO4d9VkwzpOD9KbaDW4SIoeaYPLZFkVAVsthrh0fTblWV6w1Ko-h8M5IxDvdz8JSvkkxJlz-wucMe86RzeZ4dMOQEM2zv3To6Ru6nPXwzN5YGCvvGNUJGAPbrNDRAq4GVNKlIBPJUK0KkLHDzHuvsK-m30wOFmUlSpely-M9Rhq4wVBhg_o7zeeUCe9aNaeqTtwol7SO23n2qqzznoPUOQEIJg8h2lLW5gh-uNbRRfQh2oOvFsQVQZPZDtaxs7XhZYywxe3XiZ5wP4J3S8gyb9an6zvGsYAHKt7tg69LdrAv6JE",
       "n": "o36zvtfPixDY1T_Eg2TlzJwn7kpJ3iOlvFtn0FkM20PHlC8DM_A6iGtOdNwGPWH0uoJ5r03W9knh3S1cnFf9Apz3NJoxvmgojNjIYPrkxU3AgzJYPpE2Icg_Iqe5dqY9qQbg-3Uqfdih9x2qs02xPmnD9FX1ewYmn15WpDYsWpeKWi6SC91y9R15kpL02PJOG2DcKGHte25VZIJ3ysrnrGULgF1J7kQp1j87TMho266pj_GHmcV1XThw8mfk4JXUBMC47KvdQkyRR6cKlT9IeMPk18s2LKk3UsFflkvpGMi04l5Jx8vNZ_QfsewFtA1JG5_ce3HeRzmepoeYeF4U9ClDRKRslqOBPcx-aMB3gE6nwMA2JYt8xtCxjoptSfZAeyoOLd4s739tpxwjpiXzcuNOCvhYN_zOzdaMZCTJJ1E5UQpDdw8-9u3ZR7ZPlJFY6uVA6EJ6kOz4EKBPw2A_MWoRS0SjFokPGWfOaaccONNE8Gks2tWZtGxFXXW63JTS8T9LcZ-6mwan4XRhVGUUynBCLsv6wplVhH1kOkbIXDpyfpembOhdFQe9NuwZpdutIbi2DPFfYmrEr3xyGEteR69WGo7OyIGGL6His46xs5YBj_X3_aDltz-jYI11OdfQj2XmiBI8PIAzgYKULLPfrupgFaswsJzPVUK8vrpdE58",
       "e": "AQAB",
-      "p": "wyT2tVnlFA_mAD3SatHxaoD5OsE7kzxQb9rNx1PZ5GiK9fcyRE6xfS4pv_5RsvqHgwgZYNaydMytsg7Uq2gcQCA7gAyKD56ROw6nQCt2Tnv2US1Lu4s_DnUlQYdAaWwOYWCSOyrMH1TxtgCzveT9qO1PAknzyWJyb4wm9JMyzFdKh_Ck3nCO9_YhwmhYg3H1eT2cB-mdIG2ULc7yB8gvLccOqDea_C0LNur_iPTs9xwQnIOkD3GSKetWaHyXq2EnhFCoPStWZjUmItIrbEelcFOIIXTUWKk5eAQtOfmBjrEEimHktmVZNSppooD8zYq9cIxjyfjMfeneBDtGdK_xCQ",
-      "q": "1nsOGyOanwY5-JtAnf_m3wnzbAbY40bLB6DLQe3LqWb4Ow7b0XpSdEHJwV0_8jA1pNi3PouSDHSvj8G7Af9BncL2w9aTO1v6G_sHvHbP2U49RHrpRepBWrCWd2dV_CJdKJef4s2xURk44tPebZyPggvGo77qVWBal-MRkQcwnJHMgaht5QisP1LLSPjWswMkPQkuoIqqZlhFtgIkyz0hLqil1CbylU7i1ExXko8GT2fp8AG5iwdAJ6FrwyIuDTAgI2kx5tVpEdFfRDY7J2icbhvVVOFihkpjWUp-nVcp1K1ksaqU9_N3lu902L_lYusFMTxvqQ7yL5OYY4e3K-WRZw",
+      "p": RSA_KEY_P,
+      "q": RSA_KEY_Q,
       "dp": "PbJCDbQOKPmdzhW9oOgfW3zLTzgojbRT-glDZfGswfoLdRhiXBZFJz6hFIJjciKjFVpKK8O1SBguEk1-D3Mq-1s1dJaCT83iPLm1RyR2kvm-NowLlY_Ar-F5le4c_zealE7j7LDrODyy7sfqC--KAw6EHEUlPlZRt9KnvkuLk-9FMRV0Cp-rk9nNcplq4qP06BACdL33X3lFj_YNr0grIl381FJAPdo_4W0KvVIyWS4WUmWMSRWvEHHHL-G0Ugq1Y6_cgPpipo3HMNshv2ondAv0zh8Rw7Y85STs55dqzqJIvTeWB9SjD5wJKcd-Jb3nht3b7s8qV-TIvK3A6MN3gQ",
       "dq": "Gl1WBpAB2bpyNdUfxExInPIkMgtFbeqt2moxkhEhD9nQebIB42Yd7JyJqHNGAQdcEL9zBwUxFsbhLdKqojw2XKYynzApOQq9W-MnuEsCkbvEXD6fnjCFiBhc5qCVOUEgInVA-ig-u7FWBMv2c5LjMSExcb9uHsCRYkpPRnyTxStG8Ek7-QNv6PjMdFPiUG76bWZLjQB-ocYIC6-HxlPlWE7y03lWKHRh_abEvQdHx0sGvrH3lNd3U2fMT1hMQOLBkJjFwZJKMB6Ej2X7L4T0dbSGLMDn04ohXECD_-NPCQ2naw-E8FXFRZB51IsCL36kTMEZGLb1nlOOT-3G3maB0Q",
       "qi": "gakrrA_MsPcjAFsE_I9amgoTI4pLe3Da3WAA24iBMNBv6M0xZV7GGKv0pMvSfZzsQeQH4eqZwbSRjLeUz9dU4eW02k9RvfASImvyCyhstAj6oGtrqcKuPOR9n4Wci0tXbRawbXhDR7y6Kyj7LHEketqJGVciGmYgcZEC017LOR0lJhcb_WwgcFnqBa2qx6wYknI6EsTyaxjJzTm1bPusi8oe5RQ_-SqG36yfPBdjNLDm0XvNRXZkQC26MzESL4AU-dakUvFsUl7WG8lIevponmooNlR0KTVmCJE9fM5H8dap_CyrPfDtUxm75YBPuk5EvZNShyo6JdN7eltT-5JRCQ"

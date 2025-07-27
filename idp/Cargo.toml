@@ -16,6 +16,7 @@ hmac = "0.12.1"
 jiff = "0.2.15"
 password-hash = { version = "0.5.0" }
 rand_core = { version = "0.6.0", features = ["getrandom"] }
+rsa = { version = "0.9.8", features = ["sha2"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 sha1 = "0.10.6"

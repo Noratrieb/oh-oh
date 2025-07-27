@@ -15,6 +15,7 @@ CREATE TABLE oauth_codes (
     created_time_ms INTEGER NOT NULL,
     user_id INTEGER NOT NULl,
     used INTEGER NOT NULL DEFAULT 0,
+    scope TEXT NOT NULL,
 
     FOREIGN KEY(client_id) REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
